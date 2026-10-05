@@ -9,17 +9,17 @@ cd intro-perception
 source .venv/bin/activate
 ```
 
-I used the setup script with `--yolo` so I could train and run YOLO locally. Training automatically used MPS on my Mac.
+I used the setup script with `--yolo` so I could train and run everything locally. Training automatically ended up using MPS on my Mac.
 
 ## Dataset
 
-I used the provided labeled dataset and split it using:
+I used the provided labeled dataset and split it with:
 
 ```bash
 intro-perception-data split --data data/raw
 ```
 
-This gave me the following split:
+My final splits were:
 
 | Split | Images | Gate | No Gate | Cut-off Gates |
 |---|---:|---:|---:|---:|
@@ -27,21 +27,19 @@ This gave me the following split:
 | Validation | 183 | 147 | 36 | 79 |
 | Test | 183 | 140 | 43 | 71 |
 
-The provided manifest includes truncation metadata, so I also counted the cut-off gates in each of my existing splits. There were 619 cut-off gates in train, 79 in validation, and 71 in test.
+I got the cut-off counts using the `truncated` field in the provided manifest. There ended up being a pretty large amount of cut-off gates, especially in the training set.
 
 ## Classical
 
-For my classical implementation I changed how the possible gate posts are paired. Originally it basically chose the two biggest candidates, which could cause it to choose random vertical objects instead of the actual gate.
+For classical, the main thing I changed was how the possible gate posts get paired. Originally it pretty much just took the two biggest candidates, which could go wrong pretty easily when theres other vertical stuff in the image.
 
-I changed it so pairs are compared based on their height similarity, vertical alignment, and the distance between them. I also kept the detector conservative, so if it can't establish two plausible posts it returns the gate as not visible instead of making a confident guess.
+Instead I compared possible pairs using their height similarity, vertical alignment, and how far apart they are. I still made it return no gate if it can't find two reasonable posts instead of just guessing.
 
-The classical method uses red/black segmentation, morphology, geometric filtering, post pairing, and then calculates a confidence score. The combined segmentation mask is also kept in the debug output.
+It still uses the red/black segmentation, morphology, geometry filtering, post pairing, and confidence score. I also kept the combined mask in the debug output.
 
 ## YOLO Training
 
-For YOLO I trained the default pretrained YOLO26 nano model for 30 epochs with an image size of 640.
-
-The full training command was:
+For YOLO I used the default pretrained YOLO26 nano model and trained for 30 epochs at 640 px.
 
 ```bash
 intro-perception-train \
@@ -52,11 +50,11 @@ intro-perception-train \
   --output artifacts/yolo/best.pt
 ```
 
-The training automatically selected Apple MPS. The best weights were copied to `artifacts/yolo/best.pt`. I did not commit the weights.
+Training automatically used Apple MPS and the best weights got copied to `artifacts/yolo/best.pt`. I didn't commit the weights.
 
 ## Evaluation
 
-I ran both methods on the same 183 images in the held-out test set.
+I ran both methods on the same 183 held-out test images:
 
 ```bash
 intro-perception-run \
@@ -66,7 +64,7 @@ intro-perception-run \
   --model artifacts/yolo/best.pt
 ```
 
-Then I evaluated both prediction files:
+Then evaluated each prediction file:
 
 ```bash
 python -m intro_perception.evaluate \
@@ -88,7 +86,7 @@ python -m intro_perception.evaluate \
 | Normalized Center Error | 0.0445 | 0.0059 |
 | FPS | 704.7 | 19.5 |
 
-### Classical Metric Report
+### Classical
 
 ```json
 {
@@ -101,7 +99,7 @@ python -m intro_perception.evaluate \
 }
 ```
 
-### YOLO Metric Report
+### YOLO
 
 ```json
 {
@@ -116,82 +114,76 @@ python -m intro_perception.evaluate \
 
 ## Failure Modes
 
-There were a few pretty clear failure modes when comparing classical and YOLO.
+There were 3 main issues I noticed with classical.
 
-### 1. Missing a Gate
+### Missing the gate
 
-In one example the gate is pretty clearly visible but classical says `no gate`, while YOLO detects it. Since classical relies on its segmentation and geometry rules, if the posts dont pass those checks then it can completely miss the gate.
+Sometimes the gate is pretty clearly there but classical just says `no gate`. Since it depends on the segmentation and geometry checks, if the posts dont make it through those then theres nothing for it to pair.
 
-### 2. Pairing the Wrong Posts
+### Pairing the wrong stuff
 
-Another issue was pairing the wrong things together. I had an example where classical gave a detection, but the box was around the wrong vertical objects while YOLO detected the actual gate.
+Another issue is that theres a lot of random vertical stuff underwater that can look like a post. I had cases where classical technically found a gate, but it paired the wrong things and the box ended up nowhere near the actual gate.
 
-This is probably one of the biggest problems with the classical approach since theres other vertical objects in the scene that can look like gate posts.
+### Cut-off gates
 
-### 3. Cut-Off Gates
+Cut-off gates were also a problem. Classical wants two reasonable posts before it calls something a gate, so when part of the gate leaves the frame that assumption starts to hurt it. YOLO handled these cases a lot better from what I saw.
 
-The last failure I looked at was a cut-off gate. Part of the gate was outside the frame and classical returned `no gate`, while YOLO was still able to detect the visible part.
+## Speed vs Accuracy
 
-My classical implementation wants two plausible posts before saying the gate is visible, so this is a case where that assumption kind of works against it. This is also important for this dataset since a pretty large amount of the images are marked as cut-off.
+This was probably the biggest difference between them. Classical is insanely fast at about 705 FPS, while YOLO was only around 19.5 FPS.
 
-## Accuracy vs Speed
+But YOLO is also way more accurate. The mAP50 went from 0.0853 for classical to 0.9066 for YOLO, and the precision/recall difference is also pretty huge. The center error was way lower too.
 
-There is a pretty big tradeoff between the two methods. Classical ran at around 704.7 FPS while YOLO ran at around 19.5 FPS, so classical is way faster.
+So classical definitely wins on speed, but I don't think that speed means much if its missing or incorrectly locating this many gates.
 
-At the same time though, YOLO is way more accurate. Its mAP50 was 0.9066 compared to only 0.0853 for classical. YOLO also had much higher precision and recall, and its normalized center error was a lot smaller.
+## Training Data
 
-So classical would be useful if computation was extremely limited, but based on these results I think the accuracy difference is more important than the extra speed.
+The YOLO training split had 1467 images total, with 1193 gate images and 274 no-gate images. 619 of them were also marked as cut-off.
 
-## Training Data Coverage
+I think having that many different examples helped YOLO a lot, especially for gates that aren't fully in frame. It isn't relying on one exact color or geometry setup like classical is.
 
-The YOLO training set had 1467 images, with 1193 gate images and 274 no-gate images. Of the training images, 619 were marked as cut-off in the manifest.
-
-The training data coverage matters a lot for YOLO because it learns the gate appearance from the examples its given. Having different gate positions and difficult views helps it not depend on one exact gate appearance like classical does.
-
-The amount of cut-off examples is especially useful here. A gate isn't always going to be completely inside the camera frame, and YOLO was able to detect a partially visible gate in my examples even when classical failed. More examples with different underwater lighting, distances, angles, and partial gates would probably make it even more reliable.
-
-At the same time, the model is still dependent on the provided training data. If the real deployment environment looks very different from this dataset, the accuracy could drop.
+Training coverage is still a limitation though. If the actual pool looks really different from the training images, YOLO could obviously start doing worse. I would want more weird lighting, angles, distances, and partial gates if I kept adding to the dataset.
 
 ## Classical Assumptions
 
-The classical detector makes a few assumptions about what a gate should look like. It depends on red/black segmentation to find possible parts of the gate and then looks for vertical candidates that can be paired together.
+Classical is basically assuming that it can segment the red/black parts of the gate and then find two vertical posts that make sense together.
 
-This works really fast, but underwater lighting can change how the colors look. There can also be other vertical objects that pass the geometry checks and get paired incorrectly.
+That works really fast, but underwater lighting messes with color a lot and theres also other vertical objects everywhere. It gets even harder when the gate is cut off since there might not even be two posts available to pair.
 
-The two-post assumption is especially limiting for cut-off gates. If one post is outside the frame, classical may not have two plausible candidates anymore and returns `no gate`. YOLO doesn't explicitly need to find and pair two posts, which is probably part of why it handled the cut-off examples better.
+YOLO doesn't really have that same hard two-post requirement, which is a big reason I think it handled the harder examples better.
 
 ## Known Limitations
 
-The biggest limitation of classical is that it relies on fixed color and geometry assumptions. Lighting changes can mess with the segmentation, unrelated vertical objects can be mistaken for posts, and partial gates can fail the two-post requirement.
+Classical is really dependent on its color thresholds and geometry rules. Different lighting can mess up the mask, random vertical objects can get paired together, and partial gates can get missed.
 
-YOLO's biggest downside is speed. It was much slower than classical and it also needs trained weights. Its performance depends on how similar the actual deployment environment is to the training data too.
+YOLO is way slower and needs trained weights. Its also only as good as the data it was trained on, so theres no guarantee it performs the same if the actual environment looks really different.
 
-Another limitation is that I only evaluated these methods on the provided held-out test set. Real underwater conditions could have lighting, visibility, backgrounds, or gate orientations that aren't represented as well in this dataset.
+I also only evaluated on the provided test set, so this obviously doesn't cover every possible underwater condition.
 
 ## What I Would Deploy
 
-I would deploy YOLO. Even though classical was way faster, YOLO was still running at about 19.5 FPS and the accuracy difference was huge. For an actual gate detector I would rather have the more reliable detection than hundreds of FPS with a lot of missed or incorrectly localized gates.
+I would use YOLO. 19.5 FPS is a lot slower than classical, but its still usable and the accuracy difference is massive.
 
-If I kept working on this, I would add more difficult training images, especially different underwater lighting and partial gates. I would also try a lower inference resolution, quantization, or another optimized deployment format to see how much I could increase YOLO's FPS without losing too much accuracy.
+If I had more time I would mostly work on making YOLO faster without killing the accuracy. I'd probably start with a lower inference resolution, then maybe look at quantization or another optimized format. I would also add more difficult training images.
 
 ## Annotated Examples
 
-These are three examples from the held-out test set that show some of the main places where classical was lacking compared to YOLO.
+These were 3 examples I thought showed the difference pretty well.
 
-### Example 1: Missed Gate
+### Missed Gate
 
-Classical returns `no gate` even though the gate is visible, while YOLO is able to detect it.
+Classical says `no gate` here even though the gate is visible, while YOLO still finds it.
 
-![Missed gate comparison](evaluation/images/false_negative.jpg)
+![Missed gate](evaluation/images/false_negative.jpg)
 
-### Example 2: Incorrect Post Pairing
+### Wrong Pairing
 
-Classical pairs the wrong vertical features and ends up with a poorly localized detection, while YOLO finds the actual gate.
+Here classical grabs the wrong vertical stuff instead of the actual gate. YOLO does a much better job localizing it.
 
-![Incorrect post pairing comparison](evaluation/images/incorrect_pairing.jpg)
+![Wrong pairing](evaluation/images/incorrect_pairing.jpg)
 
-### Example 3: Cut-Off Gate
+### Cut-Off Gate
 
-The gate is partially outside of the frame. Classical returns `no gate`, while YOLO is still able to detect the visible part of the gate.
+This one is partially outside the frame. Classical doesn't find a gate, while YOLO can still pick up the visible part.
 
-![Cut-off gate comparison](evaluation/images/cutoff_gate.jpg)
+![Cut-off gate](evaluation/images/cutoff_gate.jpg)
